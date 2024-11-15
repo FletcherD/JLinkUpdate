@@ -1,0 +1,126 @@
+name: Build and Release JLink Updater
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  build:
+    name: Build for ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Native builds
+          - name: linux-x64
+            os: ubuntu-latest
+            output_name: JLinkUpdate_linux_x64
+            
+          - name: windows-x64
+            os: windows-latest
+            output_name: JLinkUpdate_windows_x64.exe
+            
+          - name: macos-x64
+            os: macos-latest
+            output_name: JLinkUpdate_macos
+            
+          # Linux cross-compilation builds
+          - name: linux-i386
+            os: ubuntu-latest
+            output_name: JLinkUpdate_linux_i386
+            docker_platform: i386/ubuntu:20.04
+            
+          - name: linux-arm64
+            os: ubuntu-latest
+            output_name: JLinkUpdate_linux_arm64
+            docker_platform: arm64v8/ubuntu:20.04
+            
+          - name: linux-armhf
+            os: ubuntu-latest
+            output_name: JLinkUpdate_linux_arm
+            docker_platform: arm32v7/ubuntu:20.04
+            
+          # Windows ARM build
+          - name: windows-arm64
+            os: windows-latest
+            output_name: JLinkUpdate_windows_arm64
+            pyinstaller_arch: arm64
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up QEMU
+      if: matrix.docker_platform != ''
+      uses: docker/setup-qemu-action@v3
+      
+    - name: Set up Python
+      if: matrix.docker_platform == ''
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies (native)
+      if: matrix.docker_platform == ''
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller requests beautifulsoup4 tqdm lxml argparse ctypes glob requests
+
+    - name: Build with PyInstaller (Linux cross-compile)
+      if: matrix.docker_platform != ''
+      run: |
+        docker run --rm --platform linux/${{ contains(matrix.docker_platform, 'arm') && 'arm64' || 'amd64' }} \
+          -v ${{ github.workspace }}:/workspace \
+          ${{ matrix.docker_platform }} \
+          /bin/bash -c "
+            apt-get update && \
+            apt-get install -y python3 python3-pip && \
+            pip3 install pyinstaller requests beautifulsoup4 tqdm lxml argparse ctypes glob requests && \
+            cd /workspace && \
+            pyinstaller --onefile --name ${{ matrix.output_name }} JLinkUpdate.py
+          "
+
+    - name: Build with PyInstaller (Windows ARM64)
+      if: contains(matrix.name, 'windows-arm64')
+      run: |
+        pyinstaller --onefile --name ${{ matrix.output_name }} --target-arch ${{ matrix.pyinstaller_arch }} JLinkUpdate.py
+
+    - name: Build with PyInstaller (native)
+      if: matrix.docker_platform == '' && !contains(matrix.name, 'windows-arm64')
+      run: |
+        pyinstaller --onefile --name ${{ matrix.output_name }} JLinkUpdate.py
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.output_name }}
+        path: dist/${{ matrix.output_name }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          JLinkUpdate_linux_x64/JLinkUpdate_linux_x64
+          JLinkUpdate_linux_i386/JLinkUpdate_linux_i386
+          JLinkUpdate_linux_arm64/JLinkUpdate_linux_arm64
+          JLinkUpdate_linux_arm/JLinkUpdate_linux_arm
+          JLinkUpdate_windows_x64.exe/JLinkUpdate_windows_x64.exe
+          JLinkUpdate_windows_arm64.exe/JLinkUpdate_windows_arm64.exe
+          JLinkUpdate_macos/JLinkUpdate_macos
+        body: |
+          ## JLink Updater Release
+          
+          Automated release containing binaries for:
+          - Linux (x64, i386, ARM64, ARMv7)
+          - Windows (x64, ARM64)
+          - macOS (x64)
